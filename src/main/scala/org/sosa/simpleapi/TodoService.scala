@@ -12,30 +12,24 @@ import slick.driver.H2Driver.api._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
+import scalaz.concurrent.Task
+import scalaz.syntax.either._
+import scalaz._
+
+import scala.concurrent.ExecutionContext
 import scala.util.{Success, Failure}
-
-
-object DbSetup {
-  val migration = DBIO.seq(
-    // Create the schema
-    // tables using the query interfaces
-    Todos.todos.schema.create,
-
-    /* Create / Insert */
-
-    // Insert some Todos
-    Todos.todos += Todo(Some(1), "Do the Laundry", "Before doing the laundry, get quarters.", false),
-    Todos.todos += Todo(Some(2), "Buy More Coffee from Ritual", "The Colombian one is running out.", false),
-    Todos.todos += Todo(Some(3), "Buy New Pokemon", "Let's see if the new Pokemon holds up", false),
-    Todos.todos += Todo(Some(4), "Finish Old Pokemon", "Review the old Pokemon.", true),
-      Todos.todos += Todo(Some(5), "Buy Kombucha", "You need that healthy drink.", true))
-}
-
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 object TodoService {
   implicit def TodoCodecJson: CodecJson[Todo] = casecodec4(Todo.apply, Todo.unapply)("id", "title", "description", "done")
   implicit def TodoEntityEncoder: EntityEncoder[Todo] = jsonEncoderOf[Todo]
   implicit def TodosEntityEncoder: EntityEncoder[List[Todo]] = jsonEncoderOf[List[Todo]]
+  implicit def TodoFormCodecJson: CodecJson[TodoForm] = casecodec2(TodoForm.apply, TodoForm.unapply)("title", "description")
+  implicit def TodoFormDecoderJson: DecodeJson[TodoForm] = jdecode2L(TodoForm.apply)("title", "description")
+  implicit def TodoFormEntityEncoder: EntityEncoder[TodoForm] = jsonEncoderOf[TodoForm]
+  implicit def TodoFormEntityDecoder: EntityDecoder[TodoForm] = jsonOf[TodoForm]
+
 
   val db = Database.forURL("jdbc:h2:mem:todos;DATABASE_TO_UPPER=false;DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
   val setupFuture = db.run(DbSetup.migration)
@@ -45,38 +39,64 @@ object TodoService {
     case Failure(t) => println("An error has occured: " + t)
   }
 
-
   val httpService = HttpService {
-    case GET -> Root / "hello" / name =>
-      Ok(jSingleObject("message", jString(s"Hello, ${name}")))
-
     case GET -> Root / "todos" =>
-      val q = db.run(Todos.all)
-      val todosList = q.transform(_.toList, Throwable => Throwable)
-      Ok(todosList)
+      task(Todos.all) flatMap {
+        case todos => Ok(todos.toList)
+      }
 
-    // case req @ POST -> Root / "todos" =>
-    //   req.decode[UrlForm] { data =>
-    //     val todoForm = for {
-    //       title <- data.getFirst("title")
-    //       description <- data.getFirst("description")
-    //     } yield TodoForm(title, description)
-    //   }
+    case req @ POST -> Root / "todos" =>
+      req.as[TodoForm] flatMap {
+        todo => task(Todos.insert(todo)) flatMap {
+          case x => Created()
+        }
+      }
 
     case GET -> Root / "todos" / IntVar(id) =>
-      val q = db.run(Todos.find(id))
-      val todosList = q.transform(_.toList, Throwable => Throwable)
-      Ok(todosList)
+      task(Todos.find(id)) flatMap {
+        case Some(todo) => Ok(todo)
+        case _ => NotFound()
+      }
+
+    case req@DELETE -> Root / "todos" / IntVar(id) =>
+      task(Todos.find(id)) flatMap {
+        case Some(todo) => task(Todos.delete(todo.id.get)) flatMap {_ => NoContent()}
+        case _ => NotFound()
+      }
 
     case GET -> Root / "todos" / "done" =>
-      val q = db.run(Todos.findAllDone)
-      val todosList = q.transform(_.toList, Throwable => Throwable)
-      Ok(todosList)
+      task(Todos.findAllDone) flatMap {
+        case todos => Ok(todos.toList)
+      }
+
+    case PUT -> Root / "todos" / "done" / IntVar(id)=>
+      task(Todos.find(id)) flatMap {
+        case Some(todo) => task(Todos.setDone(todo.id.get)) flatMap {_ => Ok()}
+        case _ => NotFound()
+      }
 
     case GET -> Root / "todos" / "open" =>
-      val q = db.run(Todos.findAllOpen)
-      val todosList = q.transform(_.toList, Throwable => Throwable)
-      Ok(todosList)
+      task(Todos.findAllOpen) flatMap {
+        case todos => Ok(todos.toList)
+      }
+
+    case PUT -> Root / "todos" / "open" / IntVar(id)=>
+      task(Todos.find(id)) flatMap {
+        case Some(todo) => task(Todos.setOpen(todo.id.get)) flatMap {_ => Ok()}
+        case _ => NotFound()
+      }
 
   }
+
+  protected def task[R](action: DBIO[R]): Task[R] = {
+    val poolSize = 40
+    implicit val executionContext = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(poolSize))
+    Task.async { t =>
+      db.run(action) onComplete {
+        case Success(x) => t(\/-(x))
+        case Failure(x) => t(-\/(x))
+      }
+    }
+  }
+
 }

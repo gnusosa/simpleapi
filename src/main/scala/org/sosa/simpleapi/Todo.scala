@@ -18,10 +18,21 @@ class Todos(tag: Tag) extends Table[Todo](tag, "todos") {
 }
 
 object Todos {
-  val todos = TableQuery[Todos]
+  val table = TableQuery[Todos]
 
-  def all() = todos.result
-  def find(idx: Int)  = todos.filter(_.id === idx).result
-  def findAllDone() = todos.filter(_.done === true).result
-  def findAllOpen() = todos.filter(_.done === false).result
+  def all() = table.result
+  def find(idx: Int)  = table.filter(_.id === idx).result.headOption
+  def findAllDone() = table.filter(_.done === true).result
+  def findAllOpen() = table.filter(_.done === false).result
+
+  def setStatus(idx: Int, status: Boolean) = { val q = for { t <- table if t.id === idx } yield t.done
+    q.update(status)
+  }
+
+  def setDone(idx: Int) = setStatus(idx, true)
+  def setOpen(idx: Int) = setStatus(idx, false)
+
+  def insert(todoF: TodoForm) = table += Todo(None, todoF.title, todoF.description)
+  def delete(idx: Int) = table.filter(_.id === idx).delete
 }
+
